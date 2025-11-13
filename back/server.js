@@ -1,96 +1,78 @@
 const express = require("express");
-const WebSocket = require("ws");
-const path = require("path");
-const { v4: uuidv4 } = require("uuid");
-const cors = require("cors");
 const http = require("http");
+const path = require("path");
+const cors = require("cors");
+const { v4: uuidv4 } = require("uuid");
+const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
 app.use("/images", express.static(path.join(__dirname, "images")));
 
 app.get("/", (req, res) => {
-  res.send("WebSocket + Express server is running on Render!");
+  res.send("Socket.IO + Express server is running on Render!");
 });
 
-// --- Create a single server ---
 const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+});
 
-// --- Attach WebSocket to the same HTTP server ---
-const wss = new WebSocket.Server({ server });
-
-// --- Store rooms ---
 const rooms = new Map();
-
-// --- Image categories (unchanged) ---
 const imageCategories = { /* your big object here */ };
 
-// --- Helper function to assign images ---
-function assignImages(room) {
-  if (room.players.length === 2) {
-    const category = room.category || "others";
-    const images = imageCategories[category];
+function assignImages(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || room.players.length < 2) return;
 
-    if (!images || images.length < 2) {
-      console.error(`Category ${category} has insufficient images.`);
-      return;
-    }
+  const category = room.category || "others";
+  const images = imageCategories[category];
+  if (!images || images.length < 2) return;
 
-    const [img1, img2] = images.sort(() => 0.5 - Math.random()).slice(0, 2);
-    room.players[0].send(JSON.stringify({ type: "receiveImage", image: img1, role: "You are Player 1" }));
-    room.players[1].send(JSON.stringify({ type: "receiveImage", image: img2, role: "You are Player 2" }));
+  const [img1, img2] = images.sort(() => 0.5 - Math.random()).slice(0, 2);
 
-    room.players.forEach((player) => player.send(JSON.stringify({ type: "gameStart" })));
-  }
+  io.to(room.players[0]).emit("receiveImage", { image: img1, role: "You are Player 1" });
+  io.to(room.players[1]).emit("receiveImage", { image: img2, role: "You are Player 2" });
+  io.to(roomId).emit("gameStart");
 }
 
-// --- WebSocket connection handling ---
-wss.on("connection", (ws) => {
-  console.log("New player connected");
+io.on("connection", (socket) => {
+  console.log("Player connected:", socket.id);
 
-  ws.on("message", (message) => {
-    const data = JSON.parse(message);
-
-    if (data.type === "createRoom") {
-      const roomId = uuidv4().slice(0, 6);
-      const category = data.category || "others";
-      rooms.set(roomId, { players: [ws], category });
-
-      ws.send(JSON.stringify({ type: "room-created", roomId }));
-      console.log(`Room ${roomId} created`);
-    } else if (data.type === "joinRoom") {
-      const { roomId } = data;
-      if (rooms.has(roomId)) {
-        const room = rooms.get(roomId);
-        if (room.players.length < 2) {
-          room.players.push(ws);
-          assignImages(room);
-        } else {
-          ws.send(JSON.stringify({ type: "error", message: "Room is full" }));
-        }
-      } else {
-        ws.send(JSON.stringify({ type: "error", message: "Room not found" }));
-      }
-    } else if (data.type === "rematch") {
-      const { roomId } = data;
-      if (rooms.has(roomId)) {
-        assignImages(rooms.get(roomId));
-      }
-    } else if (data.type === "guess") {
-      const { roomId, message } = data;
-      if (rooms.has(roomId)) {
-        rooms.get(roomId).players.forEach((player) =>
-          player.send(JSON.stringify({ type: "guess", message }))
-        );
-      }
-    }
+  socket.on("createRoom", ({ category = "others" }) => {
+    const roomId = uuidv4().slice(0, 6);
+    rooms.set(roomId, { players: [socket.id], category });
+    socket.join(roomId);
+    socket.emit("room-created", { roomId });
+    console.log(`Room ${roomId} created`);
   });
 
-  ws.on("close", () => console.log("Player disconnected"));
+  socket.on("joinRoom", ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (!room) return socket.emit("error", { message: "Room not found" });
+    if (room.players.length >= 2)
+      return socket.emit("error", { message: "Room is full" });
+
+    room.players.push(socket.id);
+    socket.join(roomId);
+    assignImages(roomId);
+  });
+
+  socket.on("rematch", ({ roomId }) => assignImages(roomId));
+
+  socket.on("guess", ({ roomId, message }) => {
+    io.to(roomId).emit("guess", { message });
+  });
+
+  socket.on("disconnect", () => {
+    for (const [roomId, room] of rooms.entries()) {
+      room.players = room.players.filter((id) => id !== socket.id);
+      if (room.players.length === 0) rooms.delete(roomId);
+    }
+    console.log("Player disconnected:", socket.id);
+  });
 });
 
-// --- Use Render's provided PORT ---
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server (HTTP + WS) running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
