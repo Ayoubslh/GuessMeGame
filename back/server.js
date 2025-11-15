@@ -2,6 +2,7 @@ const express = require("express");
 const http = require("http");
 const path = require("path");
 const cors = require("cors");
+const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
 const { Server } = require("socket.io");
 
@@ -19,14 +20,42 @@ const io = new Server(server, {
 });
 
 const rooms = new Map();
-const imageCategories = { /* your big object here */ };
+
+// Map exposed category keys to actual directory names
+const folderMapping = {
+  others: "others",
+  anime: "animechar",
+  football: "foot",
+  game: "gamechar",
+  cars: "cars",
+};
+
+// Dynamically build the imageCategories object with relative paths
+const imagesBasePath = path.join(__dirname, "images");
+const imageCategories = {};
+for (const [category, folderName] of Object.entries(folderMapping)) {
+  try {
+    const dirPath = path.join(imagesBasePath, folderName);
+    const files = fs.readdirSync(dirPath, { withFileTypes: true })
+      .filter((d) => d.isFile())
+      .map((d) => d.name)
+      .filter((name) => /\.(jfif|jpe?g|png|gif|webp)$/i.test(name))
+      // Use forward slashes so the client can request /images/<relative>
+      .map((name) => `${folderName}/${name}`);
+    // Remove duplicates (some folders contain duplicate filename variants)
+    imageCategories[category] = Array.from(new Set(files));
+  } catch (err) {
+    console.warn(`Could not read images for category '${category}': ${err.message}`);
+    imageCategories[category] = [];
+  }
+}
 
 function assignImages(roomId) {
   const room = rooms.get(roomId);
   if (!room || room.players.length < 2) return;
 
   const category = room.category || "others";
-  const images = imageCategories[category];
+  const images = imageCategories[category] || imageCategories["others"];
   if (!images || images.length < 2) return;
 
   const [img1, img2] = images.sort(() => 0.5 - Math.random()).slice(0, 2);
